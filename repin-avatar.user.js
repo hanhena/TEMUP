@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         RE:PIN 인장 커스터마이저 · 대본-개편 (PC/모바일)
 // @namespace    https://repin.chat/
-// @version      1.8.3
-// @description  대본-개편 사각 인장 · PC 백업 JSON · 테마 중복 수정 · 공용 인장 보관함 · 하단 메뉴 (PC/모바일).
+// @version      1.8.4
+// @description  대본-개편 사각 인장 · 모바일 성능 개선 · 공용 인장 보관함 · 백업 JSON (PC/모바일).
 // @homepageURL   https://github.com/hanhena/TEMUP
 // @updateURL     https://raw.githubusercontent.com/hanhena/TEMUP/main/repin-avatar.user.js
 // @downloadURL   https://raw.githubusercontent.com/hanhena/TEMUP/main/repin-avatar.user.js
@@ -185,6 +185,8 @@
 
   let db = structuredClone(DEFAULT_DB);
   let ready = false, updateScheduled = false, scanning = false, picking = false;
+  let avatarTimer = null;
+  const mobilePerformanceMode = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || matchMedia('(pointer:coarse)').matches;
   let panelOpen = false, formImage = null, pickFingerprint = null, pendingCropObjectUrl = null, cropImageNatural = null;
   let cropState = { scale: 1, minScale: 1, maxScale: 4, x: 0, y: 0, dragging: false, dragStartX: 0, dragStartY: 0, startX: 0, startY: 0 };
   let root, shadow, panel, workLabel, entries, statusText, nameInput, fileInput, previewImg, previewPlaceholder;
@@ -375,9 +377,13 @@
     } finally {scanning=false;}
   }
   function scheduleApply() {
-    if(updateScheduled) return;
+    if (updateScheduled) return;
     updateScheduled=true;
-    requestAnimationFrame(()=>{ updateScheduled=false; applyAll(); });
+    // Do not perform a full avatar scan in every animation frame while typing.
+    avatarTimer = setTimeout(() => {
+      avatarTimer = null;
+      requestAnimationFrame(() => { updateScheduled=false; applyAll(); });
+    }, mobilePerformanceMode ? 420 : 100);
   }
   async function persist() {
     try { await chrome.storage.local.set({[STORE_KEY]:db}); return true; }
@@ -786,15 +792,24 @@
     ready=true;
     scheduleApply();
     const observer=new MutationObserver(mutations=>{
-      // Ignore changes made within extension's own shadow root.
-      if(mutations.some(m=>!isManagedUi(m.target)))scheduleApply();
+      // Ignore composer, keyboard, and unrelated site UI changes.
+      // Only the chat overlay, title, and message area can affect portraits.
+      const active=chat(), messages=messageArea(), title=document.getElementById('chatTitle');
+      const relevant=mutations.some(m=>{
+        const target=m.target;
+        if(isManagedUi(target) || target.nodeType!==Node.ELEMENT_NODE) return false;
+        if(target.closest?.('.ri-script-portrait,.ri-script-my-avatar,.ri-avatar-override'))return false;
+        if(target===active || target===title || title?.contains(target)) return true;
+        return !!messages && (target===messages || messages.contains(target));
+      });
+      if(relevant)scheduleApply();
     });
-    observer.observe(document.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:['class','style','src','aria-hidden','inert']});
+    observer.observe(document.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:['class','src','aria-hidden','inert']});
     chrome.storage.onChanged.addListener((changes,area)=>{
       if(area==='local' && changes[STORE_KEY]?.newValue){db=changes[STORE_KEY].newValue; scheduleApply();if(panelOpen)renderPanel();}
     });
     // In-page routing can update without conventional DOM events.
-    setInterval(scheduleApply,2500);
+    setInterval(() => {if(inChat() && !document.hidden) scheduleApply();}, 18000);
   }
   init();
 })();
@@ -829,6 +844,11 @@
   let activeKey = '';
   let uiStyle, customCard, inlineButton, inlineLabel, allRoomsButton;
   let pending = false;
+  let themeTimer = null;
+  let lastScanKey='', lastScanEnabled=null, lastScanArea=null;
+  let messagesDirty=true, lastMessageScan=0, lastThemeUICheck=0, lastCapture=0;
+  const textNodeFingerprint = new WeakMap();
+  const mobileMode = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || matchMedia('(pointer:coarse)').matches;
   let syncThemeSelection = false;
   let observedGrid = null, nativeCard = null;
   const nativeSyncCompleted = new Set();
@@ -1115,6 +1135,8 @@
       if (syncThemeSelection || !isEnabled() || !isChatOpen()) return;
       if (!(e.target instanceof Element)) return;
       if (e.target.closest(`#${OPTION_ID}`) || e.target.closest('#ri-avatar-switcher-root')) return;
+      // Never search the whole document for a theme card on ordinary chat clicks.
+      if (!customCard?.isConnected || !customCard.parentElement?.contains(e.target)) return;
       const match = findNativeThemeCard();
       if (!match) return;
       const card = [...match.grid.children].find(x => x !== customCard && x.contains(e.target));
@@ -1434,7 +1456,9 @@
   function processTextNode(node) {
     if (shouldIgnoreNode(node)) return;
     const text=node.textContent || '';
-    if (!text.trim()) return;
+    if (!text.trim() || textNodeFingerprint.get(node) === text) return;
+    // Existing unchanged nodes need no repeat parsing after every UI mutation.
+    textNodeFingerprint.set(node, text);
 
     // Complete speaker prefix inside one text node, including multi-line paragraphs.
     LINE_START.lastIndex = 0;
@@ -1613,39 +1637,60 @@
   }
 
   function run() {
-    if (!isChatOpen()) {
-      area()?.querySelectorAll(`.${PORTRAIT_CLASS}`).forEach(x=>x.remove());
-      removeOwnNarrationPortraits();
+    const now=Date.now(), open=isChatOpen();
+    if (!open) {
+      if(lastScanArea && lastScanEnabled){
+        lastScanArea.querySelectorAll(`.${PORTRAIT_CLASS}`).forEach(x=>x.remove());
+        removeOwnNarrationPortraits();
+      }
+      lastScanArea=null;lastScanEnabled=false;messagesDirty=true;
       return;
     }
-    if (activeKey !== workKey()) {
-      activeKey = workKey();
+    const key=workKey(), container=area(), enabled=isEnabled();
+    const roomChanged=activeKey!==key || lastScanArea!==container;
+    const themeChanged=lastScanEnabled!==enabled;
+    if (roomChanged) {
+      activeKey=key;
       nativeSyncCompleted.clear();
-      // Previous chat can keep its DOM temporarily during navigation.
-      area()?.querySelectorAll(`.${PORTRAIT_CLASS}`).forEach(x=>x.remove());
+      messagesDirty=true;
+      lastCapture=0;
+      // Do not revisit every previously rendered message on each keystroke.
+      container?.querySelectorAll(`.${PORTRAIT_CLASS}`).forEach(x=>x.remove());
     }
+    lastScanArea=container;lastScanEnabled=enabled;
     createStyles();
-    injectPanelToggle();
-    injectThemeCard();
-    normalizeNativeScriptSelection();
+    // The settings theme drawer is uncommon; avoid full-document scanning
+    // every time the message input or animation changes.
+    if(roomChanged || themeChanged || now-lastThemeUICheck > (mobileMode?3800:1800)) {
+      lastThemeUICheck=now;
+      injectPanelToggle();
+      injectThemeCard();
+      normalizeNativeScriptSelection();
+    }
+    const needsMessages=messagesDirty || roomChanged || themeChanged || now-lastMessageScan>45000;
+    if(!needsMessages) return;
+    messagesDirty=false;
+    lastMessageScan=now;
     syncLightSurface();
-    // If a room already contains native character photos, pick them up before
-    // adding our visual enhancements.  Never alter any conversation text.
-    captureNativePortraits();
+    if(now-lastCapture> (mobileMode?18000:9000) || roomChanged){
+      lastCapture=now;
+      captureNativePortraits();
+    }
     if(nativeDialogueAvatarsVisible()){
-      area()?.querySelectorAll(`.${PORTRAIT_CLASS}`).forEach(x=>x.remove());
+      container?.querySelectorAll(`.${PORTRAIT_CLASS}`).forEach(x=>x.remove());
       removeOwnNarrationPortraits();
     }else{
       applyPortraits();
       applyOwnNarrationPortraits();
     }
-    // Automatic native base normalization above handles new rooms without
-    // switching back and forth between Dialogue and Script repeatedly.
   }
   function schedule() {
     if (pending) return;
     pending = true;
-    requestAnimationFrame(() => {pending=false;run();});
+    themeTimer=setTimeout(()=>{
+      themeTimer=null;
+      requestAnimationFrame(()=>{pending=false;run();});
+    },mobileMode?380:90);
   }
   function init() {
     createStyles();
@@ -1663,17 +1708,35 @@
       schedule();
     }).catch(console.warn);
     hookNativeThemeClick();
+    // Settings panes can be mounted outside #chatOverlay. A direct user click
+    // requests one debounced theme/menu check without watching all input edits.
+    document.addEventListener('click', () => {
+      if (isChatOpen() && !document.hidden) schedule();
+    }, true);
     const observer = new MutationObserver(mutations=>{
-      const significant = mutations.some(m => {
-        const node = m.target;
-        if (node?.nodeType===Node.ELEMENT_NODE && node.closest?.(`.${PORTRAIT_CLASS},#${OPTION_ID}`)) return false;
-        if (node?.nodeType===Node.ELEMENT_NODE && node.closest?.('#ri-avatar-switcher-root')) return false;
-        if (node === uiStyle) return false;
-        return true;
-      });
-      if(significant) schedule();
+      const messages=area(), overlay=chat();
+      let shouldRun=false;
+      for(const m of mutations){
+        const node=m.target;
+        if(node===uiStyle || node?.nodeType!==Node.ELEMENT_NODE)continue;
+        if(node.closest?.(`#${OPTION_ID},#ri-avatar-switcher-root,#ri-tm-bottom-menu`))continue;
+        if(node.closest?.(`.${PORTRAIT_CLASS},.ri-avatar-override`))continue;
+        if(messages && (node===messages || messages.contains(node))){
+          if(m.type==='attributes' && m.attributeName==='style')continue;
+          // Ignore extension-owned avatar insertion/removal where possible.
+          if(m.type==='childList' && m.addedNodes.length && [...m.addedNodes].every(x=>x.nodeType===Node.ELEMENT_NODE && x.matches?.(`.${PORTRAIT_CLASS},.ri-script-my-avatar`)))continue;
+          messagesDirty=true;shouldRun=true;
+        }else if(node===overlay || node.id==='chatTitle' || node.closest?.('#chatTitle')){
+          shouldRun=true;
+        }else if(!node.closest?.('#chatOverlay') && m.type==='childList'){
+          // Site settings drawers can render outside the overlay.
+          // They are checked by the low-frequency poll, not on each edit.
+          continue;
+        }
+      }
+      if(shouldRun)schedule();
     });
-    observer.observe(document.documentElement,{subtree:true,childList:true,attributes:true,attributeFilter:['class','style','src','aria-hidden','inert']});
+    observer.observe(document.documentElement,{subtree:true,childList:true,attributes:true,attributeFilter:['class','src','aria-hidden','inert']});
     chrome.storage.onChanged.addListener((changes,where)=>{
       if(where!=='local') return;
       if(changes[THEME_KEY]?.newValue) preferences=changes[THEME_KEY].newValue;
@@ -1681,7 +1744,7 @@
       if(changes[CACHE_KEY]?.newValue) nativeCache=changes[CACHE_KEY].newValue;
       schedule();
     });
-    setInterval(schedule,2400);
+    setInterval(() => {if(isChatOpen() && !document.hidden) schedule();}, mobileMode?6000:4000);
     schedule();
   }
   bottomMenuTheme.isEnabled = () => isEnabled();
@@ -2001,15 +2064,25 @@
     window.addEventListener('resize',()=>{if(opened) updatePlacement();});
     window.addEventListener('scroll',()=>{if(opened) updatePlacement();},true);
     // The chat controls may be replaced after SPA navigation.
-    const observer=new MutationObserver(()=> {
-      if (syncing) return;
-      queueMicrotask(ensureButton);
+    let menuCheckPending=false;
+    const observer=new MutationObserver(mutations=> {
+      if(syncing || menuCheckPending)return;
+      const relevant=mutations.some(m=>{
+        const node=m.target;
+        if(node?.nodeType!==Node.ELEMENT_NODE)return false;
+        // Most chat mutations are in #messagesContainer; never react to those.
+        if(node.closest?.('#messagesContainer'))return false;
+        return node.id==='chatOverlay' || node.closest?.('.input-actions,.input-area,.input-actions-left') ||
+          [...m.addedNodes].some(n=>n.nodeType===Node.ELEMENT_NODE && (n.id==='chatToolsBtn' || n.querySelector?.('#chatToolsBtn')));
+      });
+      if(!relevant)return;
+      menuCheckPending=true;
+      requestAnimationFrame(()=>{menuCheckPending=false;ensureButton();});
     });
     const obsTarget=document.getElementById('chatOverlay') || document.documentElement;
-    observer.observe(obsTarget,{childList:true,subtree:true,attributes:true,
-      attributeFilter:['class','aria-hidden','inert']});
+    observer.observe(obsTarget,{childList:true,subtree:true});
     ensureButton();
-    setInterval(ensureButton,1800);
+    setInterval(()=>{if(!document.hidden)ensureButton();},10000);
   }
   installChatBottomMenu();
 

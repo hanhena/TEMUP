@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         RE:PIN 인장 커스터마이저 · 대본-개편 (PC/모바일)
 // @namespace    https://repin.chat/
-// @version      1.8.2
+// @version      1.8.3
 // @description  대본-개편 사각 인장 · PC 백업 JSON · 테마 중복 수정 · 공용 인장 보관함 · 하단 메뉴 (PC/모바일).
-// @homepageURL   https://github.com/hanhena/repin-avatar-customizer
-// @updateURL     https://raw.githubusercontent.com/hanhena/repin-avatar-customizer/main/repin-avatar.user.js
-// @downloadURL   https://raw.githubusercontent.com/hanhena/repin-avatar-customizer/main/repin-avatar.user.js
+// @homepageURL   https://github.com/hanhena/TEMUP
+// @updateURL     https://raw.githubusercontent.com/hanhena/TEMUP/main/repin-avatar.user.js
+// @downloadURL   https://raw.githubusercontent.com/hanhena/TEMUP/main/repin-avatar.user.js
 // @match        https://repin.chat/*
 // @match        https://*.repin.chat/*
 // @match        https://litychat.com/*

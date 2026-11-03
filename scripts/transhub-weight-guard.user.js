@@ -1,183 +1,163 @@
 // ==UserScript==
-// @name         트랜스허브 중량 입력 실수 방지
+// @name         트랜스허브 중량 오입력 방지
 // @namespace    yammo.transhub.weightguard
-// @version      1.0.0
-// @description  도어오더상세의 중량(Kg)/TW 첫 번째 입력칸을 검사하고 잘못된 값 저장을 차단합니다.
-// @match        https://www.transhub.co.kr/*
-// @match        http://www.transhub.co.kr/*
+// @version      1.1.0
+// @description  도어오더상세 중량(Kg)/TW의 첫 번째 칸을 검사하고 브라우저 경고창으로 오입력을 방지합니다.
+// @match        *://transhub.co.kr/*
+// @match        *://www.transhub.co.kr/*
 // @run-at       document-idle
 // @grant        none
 // ==/UserScript==
 
 (() => {
   'use strict';
+  if (window.__yammoTranshubWeightGuard11) return;
+  window.__yammoTranshubWeightGuard11 = true;
 
-  // 이 업무의 중량 입력 기준. 필요하면 숫자만 바꾸세요.
-  const REQUIRED_WEIGHT = 20000;
-  const LABEL = '중량(Kg)/TW';
-  const DIALOG_TITLE = '도어오더상세';
-  const STYLE_ID = 'yammo-weight-guard-style';
-  const MARK = 'data-yammo-weight-guard';
-  let weightInput = null;
-  let lastNotified = '';
-
+  const REQUIRED = 20000;
+  const MARK = 'data-yammo-weight-status';
+  const STYLE_ID = 'yammo-weight-guard-css';
+  const bound = new WeakSet();
+  let current = null;
+  let alertedValue = null;
+  const clean = s => String(s ?? '').replace(/\s+/g, '').toLowerCase();
+  const number = s => {
+    const v = String(s ?? '').replace(/[\s,]/g, '');
+    return /^\d+$/.test(v) ? Number(v) : NaN;
+  };
+  const format = n => Number.isFinite(n) ? n.toLocaleString('ko-KR') : '숫자 아님';
   const visible = el => {
     if (!el || !el.isConnected) return false;
     const r = el.getBoundingClientRect();
-    const s = getComputedStyle(el);
-    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+    return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== 'hidden';
   };
-  const digits = raw => String(raw ?? '').replace(/,/g, '').replace(/\s/g, '');
-  const formatted = n => Number(n).toLocaleString('ko-KR');
-  const numeric = raw => {
-    const s = digits(raw);
-    return /^\d+$/.test(s) ? Number(s) : NaN;
-  };
-  const exactText = (el, value) => {
-    if (!visible(el)) return false;
-    if (el.children.length && Array.from(el.children).some(c => c.textContent.trim() === value)) return false;
-    return (el.textContent || '').trim().replace(/\s+/g, '') === value.replace(/\s+/g, '');
-  };
+  const isInput = el => el instanceof HTMLInputElement &&
+    !['hidden','checkbox','radio','button','submit'].includes(el.type) && visible(el);
 
-  function findDialog() {
-    const candidates = Array.from(document.querySelectorAll('div,span,td,strong,h1,h2,h3'))
-      .filter(el => exactText(el, DIALOG_TITLE));
-    for (const heading of candidates) {
-      let node = heading.parentElement;
-      for (let i = 0; i < 9 && node; i++, node = node.parentElement) {
-        const rect = node.getBoundingClientRect();
-        if (rect.width > 600 && rect.height > 350 && node.querySelectorAll('input').length >= 8) {
-          if (Array.from(node.querySelectorAll('*')).some(el => exactText(el, LABEL))) return node;
-        }
+  function findInput(root = document) {
+    const labels = [];
+    const nodes = root.querySelectorAll('td,th,label,span,div,p,strong');
+    for (const el of nodes) {
+      if (!visible(el)) continue;
+      const s = clean(el.textContent);
+      if (!/중량\(?kg\)?\/tw/i.test(s)) continue;
+      // 큰 컨테이너보다 실제 라벨(가장 작은 요소)을 우선.
+      if (el.children.length && Array.from(el.children).some(child =>
+          /중량\(?kg\)?\/tw/i.test(clean(child.textContent)))) continue;
+      if (s.length > 45) continue;
+      labels.push(el);
+    }
+
+    const inputs = Array.from(root.querySelectorAll('input')).filter(isInput);
+    let best = null;
+    let score = Infinity;
+    for (const label of labels) {
+      const a = label.getBoundingClientRect();
+      const ly = (a.top + a.bottom) / 2;
+      for (const input of inputs) {
+        const b = input.getBoundingClientRect();
+        const dx = b.left - a.right;
+        const dy = Math.abs((b.top + b.bottom) / 2 - ly);
+        // 중량 라벨의 바로 오른쪽에 있는 첫 입력칸만 선택.
+        if (dx < -8 || dx > 380 || dy > 24) continue;
+        const sc = dy * 10 + dx;
+        if (sc < score) { score = sc; best = input; }
       }
     }
-    return null;
+    return best;
   }
 
-  function findWeightInput() {
-    const dialog = findDialog();
-    if (!dialog) return null;
-    const labels = Array.from(dialog.querySelectorAll('label,td,span,div,th'))
-      .filter(el => exactText(el, LABEL));
-    const inputs = Array.from(dialog.querySelectorAll('input'))
-      .filter(el => visible(el) && !el.disabled && el.type !== 'hidden');
-
-    for (const label of labels) {
-      const r = label.getBoundingClientRect();
-      // '중량(Kg)/TW' 라벨 오른쪽의 첫 번째 입력칸을 선택합니다.
-      const choices = inputs.map(input => {
-        const a = input.getBoundingClientRect();
-        const dx = a.left - r.right;
-        const dy = Math.abs((a.top + a.bottom) / 2 - (r.top + r.bottom) / 2);
-        return { input, dx, dy };
-      }).filter(x => x.dx >= -5 && x.dx < 600 && x.dy < 28)
-        .sort((a, b) => a.dx - b.dx || a.dy - b.dy);
-      if (choices.length) return choices[0].input;
-    }
-    return null;
-  }
-
-  function ensureStyle() {
-    if (document.getElementById(STYLE_ID)) return;
-    const style = document.createElement('style');
+  function installStyle(doc) {
+    if (doc.getElementById(STYLE_ID)) return;
+    const style = doc.createElement('style');
     style.id = STYLE_ID;
     style.textContent = `
-      input[${MARK}="error"] { outline: 3px solid #de3e42 !important; background:#fff1f1 !important; }
-      input[${MARK}="ok"] { outline: 2px solid #22865a !important; }
-      #yammo-weight-hint { position:fixed; z-index:2147483647; max-width:340px; padding:10px 13px; border-radius:8px;
-        background:#fff9e8; color:#8d2828; border:1px solid #e3b38e; font:600 13px/1.5 sans-serif;
-        box-shadow:0 4px 16px #0002; pointer-events:none; }
+      input[${MARK}="error"] {outline:3px solid #e02636!important;background:#fff0f0!important;}
+      input[${MARK}="ok"] {outline:2px solid #248755!important;}
     `;
-    document.head.appendChild(style);
+    (doc.head || doc.documentElement).appendChild(style);
   }
 
-  function hint(input, message) {
-    let el = document.getElementById('yammo-weight-hint');
-    if (!el) {
-      el = document.createElement('div');
-      el.id = 'yammo-weight-hint';
-      document.body.appendChild(el);
-    }
-    el.textContent = message;
-    const r = input.getBoundingClientRect();
-    el.style.left = `${Math.max(8, Math.min(window.innerWidth - 355, r.left))}px`;
-    el.style.top = `${Math.max(8, Math.min(window.innerHeight - 70, r.bottom + 7))}px`;
-    el.hidden = false;
-  }
-  function hideHint() {
-    const el = document.getElementById('yammo-weight-hint');
-    if (el) el.hidden = true;
-  }
-
-  function check(input, showWarning = true) {
+  function validate(input, warn = false) {
+    if (!input || !visible(input)) return true;
     const raw = input.value.trim();
     if (!raw) {
       input.removeAttribute(MARK);
-      hideHint();
-      return { valid: true, empty: true };
+      alertedValue = null;
+      return true;
     }
-    const value = numeric(raw);
-    if (value === REQUIRED_WEIGHT) {
-      input.setAttribute(MARK, 'ok');
-      hideHint();
-      lastNotified = '';
-      return { valid: true, empty: false };
+    const n = number(raw);
+    const valid = n === REQUIRED;
+    input.setAttribute(MARK, valid ? 'ok' : 'error');
+    if (valid) {
+      alertedValue = null;
+      return true;
     }
-    input.setAttribute(MARK, 'error');
-    if (showWarning) {
-      hint(input, `중량 확인: ${Number.isNaN(value) ? raw : formatted(value)}kg 입력됨. 이 업무의 기준은 ${formatted(REQUIRED_WEIGHT)}kg입니다.`);
+    if (warn && alertedValue !== raw) {
+      alertedValue = raw;
+      window.alert('중량 입력 오류!\n\n현재 입력: ' + (Number.isFinite(n) ? format(n) : raw) +
+        ' kg\n정상 입력: ' + format(REQUIRED) +
+        ' kg\n\n중량을 확인하고 수정해 주세요.');
     }
-    return { valid: false, empty: false, value };
+    return false;
   }
 
   function bind() {
-    ensureStyle();
-    const found = findWeightInput();
-    if (found === weightInput) return;
-    if (weightInput) weightInput.removeAttribute(MARK);
-    weightInput = found;
-    hideHint();
-    if (!weightInput) return;
-    weightInput.addEventListener('input', () => check(weightInput), { passive: true });
-    weightInput.addEventListener('change', () => check(weightInput));
-    weightInput.addEventListener('blur', () => check(weightInput));
-    check(weightInput, false);
-  }
-
-  function isSaveTrigger(event) {
-    if (event.type === 'keydown') return event.key === 'F8';
-    const target = event.target instanceof Element ? event.target : null;
-    const button = target?.closest('button,input[type="button"],input[type="submit"],a,[role="button"]');
-    if (!button) return false;
-    const text = (button.innerText || button.value || button.getAttribute('title') || '').replace(/\s/g, '');
-    return /저장/.test(text);
-  }
-
-  function guard(event) {
-    if (!isSaveTrigger(event)) return;
-    bind();
-    if (!weightInput || !visible(weightInput)) return;
-    const result = check(weightInput);
-    if (result.valid) return;
-    event.preventDefault();
-    event.stopPropagation();
-    event.stopImmediatePropagation();
-    weightInput.focus();
-    // 실수 저장은 차단하며, 값을 임의로 바꾸지는 않습니다.
-    const message = `중량 입력 오류!\n현재: ${Number.isNaN(result.value) ? weightInput.value : formatted(result.value)}kg\n기준: ${formatted(REQUIRED_WEIGHT)}kg\n\n저장을 중단했습니다. 중량을 확인하세요.`;
-    if (message !== lastNotified) {
-      lastNotified = message;
-      window.alert(message);
+    installStyle(document);
+    const found = findInput();
+    if (!found) return;
+    if (found !== current) {
+      if (current) current.removeAttribute(MARK);
+      current = found;
+      alertedValue = null;
     }
+    if (bound.has(found)) return;
+    bound.add(found);
+    found.addEventListener('input', () => validate(found, false));
+    // 숫자를 다 입력한 뒤 포커스를 벗어나거나 엔터를 누르면 크롬 기본 경고창.
+    found.addEventListener('blur', () => validate(found, true));
+    found.addEventListener('change', () => validate(found, true));
+    found.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !validate(found, true)) {
+        e.preventDefault(); e.stopImmediatePropagation();
+      }
+    }, true);
+    validate(found, false);
+  }
+
+  function isSave(e) {
+    if (e.type === 'keydown') return e.key === 'F8';
+    const el = e.target instanceof Element
+      ? e.target.closest('button,a,input[type="button"],input[type="submit"],[role="button"]') : null;
+    if (!el) return false;
+    const s = clean(el.innerText || el.value || el.title || el.getAttribute('aria-label'));
+    return s.includes('저장');
+  }
+
+  function guard(e) {
+    if (!isSave(e)) return;
+    bind();
+    if (!current || !visible(current)) return;
+    const n = number(current.value);
+    if (!current.value.trim() || n === REQUIRED) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+    // 경고는 저장 이벤트 전에 출력. 이미 같은 값으로 경고했다면 다시 표시.
+    alertedValue = null;
+    validate(current, true);
+    current.focus();
   }
 
   document.addEventListener('click', guard, true);
   document.addEventListener('keydown', guard, true);
-  // 비동기로 열리는 팝업 감지. 과도한 반복 탐색 방지를 위해 디바운스.
-  let timer = null;
+  document.addEventListener('focusin', () => bind(), true);
+  // 일부 사이트는 SPA 팝업을 나중에 생성하므로 DOM 갱신 감시.
+  let pending = false;
   new MutationObserver(() => {
-    if (timer) return;
-    timer = setTimeout(() => { timer = null; bind(); }, 300);
-  }).observe(document.documentElement, { childList: true, subtree: true });
+    if (pending) return;
+    pending = true;
+    setTimeout(() => { pending = false; bind(); }, 250);
+  }).observe(document.documentElement, {subtree:true, childList:true});
   bind();
 })();

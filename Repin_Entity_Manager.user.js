@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Repin Entity Manager
 // @namespace    https://litychat.com/
-// @version      3.0.1
+// @version      3.0.2
 // @description  리핀 개체 전용 관리자. JSON 가져오기, 개체 수정창 반영, 개체 일괄 교체, 다크 UI, AI 정리 지침 복사
 // @match        https://litychat.com/*
 // @match        https://repin.chat/*
@@ -241,6 +241,7 @@
         <button class="btn" id="diagnoseBtn">수정창 진단</button>
         <button class="btn primary" id="batchBtn">개체 일괄 동기화</button>
         <button class="btn" id="mergeDuplicateBtn">동명 개체 병합</button>
+        <button class="btn" id="recoverAttemptsBtn">등록 시도 기록 복구</button>
         <button class="btn danger hidden" id="stopBtn">중단</button>
         <button class="btn primary grow" id="addBtn">+ 개체 추가</button>
         <input type="file" id="fileInput" class="hidden" accept=".json,application/json">
@@ -1037,6 +1038,35 @@
   const readAttempts = () => { try { return JSON.parse(localStorage.getItem(attemptedStorageKey()) || '{}'); } catch { return {}; } };
   function markAttempt(name) { const x=readAttempts(); x[name]=new Date().toISOString(); localStorage.setItem(attemptedStorageKey(),JSON.stringify(x)); }
   function unmarkAttempt(name) { const x=readAttempts(); delete x[name]; localStorage.setItem(attemptedStorageKey(),JSON.stringify(x)); }
+
+  // 이전 생성 시도가 남은 경우, 실제 개체 목록을 확인한 뒤
+  // 사용자 확인을 받아 해당 이름의 보호 기록만 해제한다.
+  // 기존 개체나 다른 이름의 생성 기록, JSON은 변경하지 않는다.
+  async function recoverAttemptRecord() {
+    if(batchRunning)return alert('동기화/병합 작업이 진행 중입니다. 먼저 작업을 끝내 주세요.');
+    const attempts=readAttempts();
+    const names=Object.keys(attempts).filter(n=>attempts[n]);
+    if(!names.length)return alert('현재 보관함과 채팅 주소에 남아 있는 생성 시도 기록이 없습니다.');
+    const suggested=names.includes('한여울')?'한여울':names[0];
+    const name=prompt('복구할 생성 시도 기록의 이름을 입력해 주세요.\n\n기록된 이름: '+names.join(', ')+'\n\n※ 리핀 서버의 개체는 삭제하거나 수정하지 않습니다.',suggested)?.trim();
+    if(!name)return;
+    if(!Object.prototype.hasOwnProperty.call(attempts,name))return alert('해당 이름의 생성 시도 기록이 없습니다.');
+    if(discoverEditor())return alert('리핀 개체 추가/수정창을 먼저 닫고 다시 실행해 주세요.');
+    try{
+      await selectEntityTab();
+      if(!document.querySelector('#memoryContent'))throw Error('개체 목록을 찾지 못했습니다.');
+      await exhaustEntityList();
+      if(exactNativeNameNodes(name).length||nativeCardsByName(name).length)
+        return alert("'"+name+"' 개체가 현재 리핀 목록에 있습니다.\n중복 생성을 막기 위해 기록을 해제하지 않았습니다.");
+      const ok=confirm("'"+name+"'은 현재 표시된 개체 목록에서 확인되지 않습니다.\n\n이전에 남아 있던 생성 시도 기록 ("+attempts[name]+")만 해제할까요?\n\n※ 서버 반영이 지연되었거나 목록에 로드되지 않은 개체는 감지하지 못할 수 있습니다. 리핀 페이지를 새로고침하여 목록을 확인한 뒤 진행하는 것을 권장합니다.\n※ 개체 데이터와 리핀의 다른 기록은 삭제하지 않습니다.");
+      if(!ok)return;
+      unmarkAttempt(name);
+      alert("'"+name+"'의 이전 생성 시도 기록을 해제했습니다.\n\n리핀에 동일 이름의 카드가 없는 것을 다시 확인한 뒤 개체 일괄 동기화를 실행하세요.");
+    }catch(err){
+      alert('생성 시도 기록을 해제하지 않았습니다.\n사유: '+err.message);
+    }
+  }
+  $('#recoverAttemptsBtn').onclick=recoverAttemptRecord;
 
   // 신규 개체는 리핀 공개 UI의 '+' 버튼과 편집창만 사용합니다.
   // 저장 확인 실패 시 중단하며, 확인되지 않은 객체를 연속 생성하지 않습니다.

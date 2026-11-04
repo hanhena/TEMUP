@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Repin Entity Manager
 // @namespace    https://litychat.com/
-// @version      3.0.2
+// @version      3.0.3
 // @description  리핀 개체 전용 관리자. JSON 가져오기, 개체 수정창 반영, 개체 일괄 교체, 다크 UI, AI 정리 지침 복사
 // @match        https://litychat.com/*
 // @match        https://repin.chat/*
@@ -1207,9 +1207,31 @@
           await exhaustEntityList();
           const names=exactNativeNameNodes(entry.title);
           if(names.length||nativeCardsByName(entry.title).length){issue=entry.title+': 이미 목록에 이름이 존재함. 신규 등록 금지';break;}
+          // 이전 생성 시도 기록은 '서버 등록 완료'의 증거가 아니다.
+          // 완전한 목록 확인 후에도 이름이 없으면 명시적 확인을 받아 같은 실행에서 재시도한다.
           const attempts=readAttempts();
           if(attempts[entry.title]){
-            issue=entry.title+': 이전 생성 시도가 기록되어 있습니다 ('+attempts[entry.title]+'). 실제 등록 여부를 먼저 확인해 주세요. 중복 생성 금지';break;
+            // 이전 저장 요청이 뒤늦게 반영될 가능성을 한 번 더 확인한다.
+            await wait(600);
+            await exhaustEntityList();
+            const found=exactNativeNameNodes(entry.title).length||nativeCardsByName(entry.title).length;
+            if(found){
+              issue=entry.title+': 이전 시도 후 리핀 목록에 개체가 나타났습니다. 중복 생성을 방지하기 위해 중단합니다.';break;
+            }
+            const approved=confirm(
+              "'"+entry.title+"'의 이전 생성 시도 기록이 남아 있습니다.\\n"+
+              "기록 시각: "+attempts[entry.title]+"\\n\\n"+
+              "현재 로드된 리핀 개체 목록에는 같은 이름이 없습니다.\\n"+
+              "이름이 실제로 삭제된 것을 확인했다면 기록을 해제하고 신규 등록을 재시도할까요?\\n\\n"+
+              "취소하면 아무 것도 추가하지 않습니다."
+            );
+            if(!approved){issue=entry.title+': 사용자가 이전 생성 시도 기록 해제/재등록을 취소함';break;}
+            // 확인 후 목록에 다시 나타난 경우에는 절대 생성하지 않는다.
+            await exhaustEntityList();
+            if(exactNativeNameNodes(entry.title).length||nativeCardsByName(entry.title).length){
+              issue=entry.title+': 재확인 중 동일 이름이 발견되어 신규 생성을 중단함';break;
+            }
+            unmarkAttempt(entry.title);
           }
           markAttempt(entry.title);
           const result=await fillNewNative(entry);

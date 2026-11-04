@@ -1203,7 +1203,7 @@
           edited++;
         }else{
           // 목록 전체가 표시되었는지 다시 확인한 후 추가.
-          // 생성 시도 이력이 있는데 카드가 안 보인다면 재생성을 절대 하지 않는다.
+          // 목록에서 이름을 재확인한 뒤 이전 시도 이력이 있으면 사용자 승인으로만 재등록한다.
           await exhaustEntityList();
           const names=exactNativeNameNodes(entry.title);
           if(names.length||nativeCardsByName(entry.title).length){issue=entry.title+': 이미 목록에 이름이 존재함. 신규 등록 금지';break;}
@@ -1219,10 +1219,10 @@
               issue=entry.title+': 이전 시도 후 리핀 목록에 개체가 나타났습니다. 중복 생성을 방지하기 위해 중단합니다.';break;
             }
             const approved=confirm(
-              "'"+entry.title+"'의 이전 생성 시도 기록이 남아 있습니다.\\n"+
-              "기록 시각: "+attempts[entry.title]+"\\n\\n"+
-              "현재 로드된 리핀 개체 목록에는 같은 이름이 없습니다.\\n"+
-              "이름이 실제로 삭제된 것을 확인했다면 기록을 해제하고 신규 등록을 재시도할까요?\\n\\n"+
+              "'"+entry.title+"'의 이전 생성 시도 기록이 남아 있습니다.\n"+
+              "기록 시각: "+attempts[entry.title]+"\n\n"+
+              "현재 로드된 리핀 개체 목록에는 같은 이름이 없습니다.\n"+
+              "이름이 실제로 삭제된 것을 확인했다면 기록을 해제하고 신규 등록을 재시도할까요?\n\n"+
               "취소하면 아무 것도 추가하지 않습니다."
             );
             if(!approved){issue=entry.title+': 사용자가 이전 생성 시도 기록 해제/재등록을 취소함';break;}
